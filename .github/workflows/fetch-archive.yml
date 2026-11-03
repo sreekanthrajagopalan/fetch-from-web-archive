@@ -1,0 +1,88 @@
+name: Fetch from Web Archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Domain to fetch (e.g. example.com)"
+        required: true
+        type: string
+      cutoff_date:
+        description: "Latest snapshot date to include (YYYY-MM-DD)"
+        required: true
+        type: string
+      match_type:
+        description: "domain = include subdomains, host = exact host, prefix = URL prefix"
+        required: false
+        default: "domain"
+        type: choice
+        options: [domain, host, prefix, exact]
+      html_only:
+        description: "Only fetch text/html pages"
+        required: false
+        default: false
+        type: boolean
+      max_pages:
+        description: "Limit number of pages (0 = no limit; useful for test runs)"
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      # Inputs are passed via env vars (never interpolated into scripts) to avoid shell injection.
+      DOMAIN: ${{ inputs.domain }}
+      CUTOFF: ${{ inputs.cutoff_date }}
+      MATCH_TYPE: ${{ inputs.match_type }}
+      HTML_ONLY: ${{ inputs.html_only }}
+      MAX_PAGES: ${{ inputs.max_pages }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate inputs
+        run: |
+          [[ "$CUTOFF" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "cutoff_date must be YYYY-MM-DD"; exit 1; }
+          [[ "$MAX_PAGES" =~ ^[0-9]+$ ]] || { echo "max_pages must be an integer"; exit 1; }
+          [[ -n "$DOMAIN" ]] || { echo "domain is required"; exit 1; }
+
+      - name: Build index and download pages
+        run: |
+          args=(--output-dir output --match-type "$MATCH_TYPE" --max-pages "$MAX_PAGES")
+          if [[ "$HTML_ONLY" == "true" ]]; then args+=(--html-only); fi
+          python fetch_archive.py "$DOMAIN" "$CUTOFF" "${args[@]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Web archive fetch"
+            echo "- Domain: \`$DOMAIN\`"
+            echo "- Cutoff: \`$CUTOFF\`"
+            echo '```'
+            ls -lh output 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload archive
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-archive-${{ github.run_id }}
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0   # .tar.gz is already compressed
